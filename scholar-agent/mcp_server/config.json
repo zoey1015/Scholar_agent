@@ -1,0 +1,12 @@
+{
+    "mcpServers": {
+        "scholar-agent": {
+            "command": "python",
+            "args": ["-m", "mcp_server.server"],
+            "cwd": "/path/to/scholar-agent",
+            "env": {
+                "PYTHONPATH": "/path/to/scholar-agent"
+            }
+        }
+    }
+}
