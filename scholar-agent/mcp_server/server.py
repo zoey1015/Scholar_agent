@@ -1,29 +1,18 @@
 """
-ScholarAgent MCP Server
+ScholarAgent MCP Server（Phase 2 完整版）
 
-将系统核心能力暴露为 MCP Tools，供 Claude 桌面端等支持 MCP 的客户端调用。
-MCP Tool 是面向外部客户端的粗粒度接口，内部编排多个 Skill。
-
-启动方式:
-    python -m mcp_server.server
-
-Claude Desktop 配置 (claude_desktop_config.json):
-{
-    "mcpServers": {
-        "scholar-agent": {
-            "command": "python",
-            "args": ["-m", "mcp_server.server"],
-            "cwd": "/path/to/scholar-agent"
-        }
-    }
-}
+Tools:
+  - search_papers     语义检索论文/专利
+  - get_paper_detail  获取文档详情
+  - save_note         保存对话为结构化研究笔记
+  - search_notes      检索历史研究笔记
+  - get_task_status   查询异步任务状态
 """
 
 import asyncio
 import logging
 import sys
 
-# 确保项目根目录在 Python path 中
 sys.path.insert(0, ".")
 
 from mcp.server import Server
@@ -43,11 +32,10 @@ app = Server("scholar-agent")
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    """注册 MCP Tools"""
     return [
         Tool(
             name="search_papers",
-            description="从知识库中语义检索论文和专利。支持中英文查询。返回相关文档片段。",
+            description="从知识库中语义检索论文和专利。支持中英文查询，返回相关文档片段。",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -56,36 +44,46 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "enum": ["all", "paper", "patent"],
                         "default": "all",
-                        "description": "筛选文档类型",
                     },
-                    "top_k": {"type": "integer", "default": 5, "description": "返回数量"},
+                    "top_k": {"type": "integer", "default": 5},
                 },
                 "required": ["query"],
             },
         ),
         Tool(
             name="get_paper_detail",
-            description="获取指定文档的详细内容，包括摘要、章节全文等。",
+            description="获取指定文档的详细信息，包括摘要、作者、章节等。",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "document_id": {"type": "string", "description": "文档 ID"},
-                    "section": {
-                        "type": "string",
-                        "description": "指定章节（可选），如 'abstract', 'method', 'results'",
-                    },
                 },
                 "required": ["document_id"],
             },
         ),
         Tool(
             name="save_note",
-            description="将当前对话的讨论总结保存为研究笔记，存入知识库。会自动提取创新点、关键问题、待验证假设。",
+            description=(
+                "将当前对话的内容保存为结构化研究笔记。"
+                "会自动提取：核心问题、创新点、假设、结论、待验证实验。"
+                "建议在每次有价值的讨论结束后调用。"
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "conversation": {"type": "string", "description": "需要总结的对话内容"},
-                    "title": {"type": "string", "description": "笔记标题（可选，不填则自动生成）"},
+                    "conversation": {
+                        "type": "string",
+                        "description": "需要保存的对话内容（复制对话文本）",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "笔记标题（可选，不填则自动生成）",
+                    },
+                    "cited_doc_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "对话中涉及的文档 ID 列表（可选）",
+                    },
                 },
                 "required": ["conversation"],
             },
@@ -108,7 +106,7 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "task_id": {"type": "string", "description": "任务 ID"},
+                    "task_id": {"type": "string"},
                 },
                 "required": ["task_id"],
             },
@@ -118,12 +116,6 @@ async def list_tools() -> list[Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """
-    Tool 调用入口
-
-    MCP Tool → 编排 Skill → 返回结果
-    """
-
     if name == "search_papers":
         return await _handle_search_papers(arguments)
     elif name == "get_paper_detail":
@@ -146,7 +138,7 @@ async def _handle_search_papers(args: dict) -> list[TextContent]:
     """search_papers: RetrievalSkill → 格式化输出"""
     skill = skill_registry.get("retrieval")
     if not skill:
-        return [TextContent(type="text", text="RetrievalSkill is not available.")]
+        return [TextContent(type="text", text="检索服务暂不可用。")]
 
     context = SkillContext(
         user_id=MOCK_USER_ID,
@@ -161,42 +153,223 @@ async def _handle_search_papers(args: dict) -> list[TextContent]:
     results = result.data.get("results", []) if result.data else []
 
     if not results:
-        return [TextContent(type="text", text="知识库中未找到相关内容。请确认已上传相关论文。")]
+        return [TextContent(
+            type="text",
+            text="知识库中未找到相关内容。请确认已上传相关论文，或尝试换一个关键词。"
+        )]
 
-    # 格式化检索结果
-    formatted = []
+    lines = [f"找到 {len(results)} 条相关内容：\n"]
     for i, r in enumerate(results):
-        formatted.append(
-            f"[{i+1}] {r.get('section_title', 'N/A')}\n"
-            f"    来源: {r.get('document_title', 'Unknown')}\n"
-            f"    内容: {r.get('content', '')[:300]}...\n"
+        score = r.get("score", 0)
+        lines.append(
+            f"[{i+1}] 章节：{r.get('section_title', 'N/A')}\n"
+            f"    相关度：{score:.3f}\n"
+            f"    内容：{r.get('content', '')[:300]}...\n"
+            f"    文档ID：{r.get('document_id', '')}\n"
         )
 
-    return [TextContent(type="text", text="\n".join(formatted))]
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def _handle_get_paper_detail(args: dict) -> list[TextContent]:
     """get_paper_detail: 查询 PostgreSQL → 返回文档详情"""
-    # TODO Phase 1: 查询数据库
-    return [TextContent(type="text", text=f"Document {args['document_id']}: detail not implemented yet.")]
+    from backend.db.postgres import SyncSession
+    from backend.models.document import Document
+    from sqlalchemy import select
+    import uuid
+
+    doc_id = args.get("document_id", "")
+    if not doc_id:
+        return [TextContent(type="text", text="请提供 document_id。")]
+
+    db = SyncSession()
+    try:
+        try:
+            stmt = select(Document).where(Document.id == uuid.UUID(doc_id))
+            doc = db.execute(stmt).scalar_one_or_none()
+        except ValueError:
+            return [TextContent(type="text", text=f"无效的 document_id: {doc_id}")]
+
+        if not doc:
+            return [TextContent(type="text", text=f"未找到文档: {doc_id}")]
+
+        authors = doc.authors or []
+        author_names = [a.get("name", "") for a in authors if isinstance(a, dict)]
+
+        lines = [
+            f"📄 {doc.title}",
+            f"作者：{', '.join(author_names) if author_names else '未知'}",
+            f"类型：{doc.doc_type} | 语言：{doc.language}",
+            f"解析状态：{doc.parse_status}",
+        ]
+
+        if doc.abstract:
+            lines.append(f"\n摘要：\n{doc.abstract[:800]}")
+            if len(doc.abstract) > 800:
+                lines.append("...[摘要已截断]")
+
+        if doc.tags:
+            lines.append(f"\n关键词：{', '.join(doc.tags)}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
 
 
 async def _handle_save_note(args: dict) -> list[TextContent]:
-    """save_note: ConversationSummarySkill → EmbeddingSkill"""
-    # TODO Phase 2: 实现对话总结 + 向量化存储
-    return [TextContent(type="text", text="笔记保存功能将在 Phase 2 实现。")]
+    """
+    save_note: ConversationSummarySkill → NotesService.save_note
+
+    MCP Tool 是异步的，但 NotesService 内部用同步 DB。
+    在 executor 里运行以避免 event loop 冲突。
+    """
+    conversation = args.get("conversation", "").strip()
+    if not conversation:
+        return [TextContent(type="text", text="请提供 conversation 内容。")]
+
+    if len(conversation) < 50:
+        return [TextContent(type="text", text="对话内容太短，无法提炼笔记（至少 50 字）。")]
+
+    # Step 1: 调用 ConversationSummarySkill
+    skill = skill_registry.get("conversation_summary")
+    if not skill:
+        return [TextContent(type="text", text="对话总结服务暂不可用。")]
+
+    context = SkillContext(
+        user_id=MOCK_USER_ID,
+        metadata={
+            "conversation": conversation,
+            "title": args.get("title", ""),
+            "source_platform": "claude",
+            "cited_doc_ids": args.get("cited_doc_ids", []),
+        },
+    )
+
+    result = await skill.execute(context)
+
+    if result.status.value == "failed":
+        return [TextContent(type="text", text=f"笔记保存失败：{result.message}")]
+
+    # Step 2: 保存到 DB + Milvus（在 executor 中运行同步代码）
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _save():
+        from backend.services.notes_service import get_notes_service
+        return get_notes_service().save_note(
+            user_id=MOCK_USER_ID,
+            note_data=result.data,
+            source_type="mcp",
+        )
+
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        note_id = await loop.run_in_executor(pool, _save)
+
+    # 格式化输出
+    data = result.data
+    lines = [
+        f"✅ 笔记已保存！",
+        f"📝 标题：{data.get('title', '未命名')}",
+        f"🆔 笔记ID：{note_id}",
+        f"\n📋 内容概述：{data.get('summary', '')[:200]}",
+    ]
+
+    if data.get("innovations"):
+        lines.append(f"\n💡 创新点：")
+        for item in data["innovations"][:3]:
+            lines.append(f"  • {item}")
+
+    if data.get("conclusions"):
+        lines.append(f"\n🎯 主要结论：")
+        for item in data["conclusions"][:3]:
+            lines.append(f"  • {item}")
+
+    if data.get("experiments_todo"):
+        lines.append(f"\n🔬 待验证实验：")
+        for item in data["experiments_todo"][:3]:
+            lines.append(f"  • {item}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def _handle_search_notes(args: dict) -> list[TextContent]:
-    """search_notes: RetrievalSkill（notes collection）"""
-    # TODO Phase 2: 检索笔记集合
-    return [TextContent(type="text", text="笔记检索功能将在 Phase 2 实现。")]
+    """search_notes: NotesService.search_notes"""
+    query = args.get("query", "").strip()
+    if not query:
+        return [TextContent(type="text", text="请提供检索关键词。")]
+
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _search():
+        from backend.services.notes_service import get_notes_service
+        return get_notes_service().search_notes(
+            user_id=MOCK_USER_ID,
+            query=query,
+            top_k=args.get("top_k", 5),
+        )
+
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        results = await loop.run_in_executor(pool, _search)
+
+    if not results:
+        return [TextContent(
+            type="text",
+            text=f"未找到与「{query}」相关的历史笔记。"
+        )]
+
+    lines = [f"找到 {len(results)} 条相关笔记：\n"]
+    for i, r in enumerate(results):
+        lines.append(
+            f"[{i+1}] 📝 {r.get('title', '未命名')}\n"
+            f"    {r.get('summary', '')[:200]}\n"
+            f"    笔记ID：{r.get('note_id', '')}\n"
+        )
+
+    return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def _handle_get_task_status(args: dict) -> list[TextContent]:
     """get_task_status: 查询 async_tasks 表"""
-    # TODO Phase 2: 查询任务状态
-    return [TextContent(type="text", text=f"Task {args['task_id']}: status query not implemented yet.")]
+    task_id = args.get("task_id", "")
+    if not task_id:
+        return [TextContent(type="text", text="请提供 task_id。")]
+
+    from backend.db.postgres import SyncSession
+    from backend.models.document import AsyncTask
+    from sqlalchemy import select
+    import uuid
+
+    db = SyncSession()
+    try:
+        stmt = select(AsyncTask).where(AsyncTask.id == uuid.UUID(task_id))
+        task = db.execute(stmt).scalar_one_or_none()
+        if not task:
+            return [TextContent(type="text", text=f"未找到任务: {task_id}")]
+
+        status_emoji = {
+            "pending": "⏳",
+            "processing": "🔄",
+            "success": "✅",
+            "failed": "❌",
+        }.get(task.status, "❓")
+
+        lines = [
+            f"{status_emoji} 任务状态：{task.status}",
+            f"任务类型：{task.task_type}",
+            f"创建时间：{task.created_at.strftime('%Y-%m-%d %H:%M:%S') if task.created_at else 'N/A'}",
+        ]
+
+        if task.result_data:
+            lines.append(f"结果：{task.result_data}")
+        if task.error_message:
+            lines.append(f"错误：{task.error_message[:200]}")
+
+        return [TextContent(type="text", text="\n".join(lines))]
+    finally:
+        db.close()
 
 
 # ========================
@@ -204,7 +377,7 @@ async def _handle_get_task_status(args: dict) -> list[TextContent]:
 # ========================
 
 async def main():
-    logger.info("Starting ScholarAgent MCP Server...")
+    logger.info("Starting ScholarAgent MCP Server (Phase 2)...")
     init_skills()
     logger.info(f"Loaded {skill_registry.count} skills.")
 

@@ -1,20 +1,21 @@
 """
-混合检索 Skill
+混合检索 Skill（Phase 1: 向量检索实现）
 
-BM25 关键词检索 + 向量语义检索 + Reranking 重排序
-Phase 1: 先实现纯向量检索
-Phase 3: 加入 BM25 + Rerank
+Phase 1: 向量语义检索（Milvus ANN）
+Phase 3: + BM25 关键词检索 + Rerank 重排序
 """
 
 import logging
 from backend.skills.base import BaseSkill, SkillContext, SkillResult, SkillStatus
+from backend.skills.registry import skill_registry
+from backend.services.milvus_service import get_milvus_service
 
 logger = logging.getLogger(__name__)
 
 
 class RetrievalSkill(BaseSkill):
     name = "retrieval"
-    description = "从知识库中混合检索相关文档片段（BM25 + 向量 + Rerank），支持中英文查询"
+    description = "从知识库中检索相关文档片段（向量语义检索），支持中英文查询"
     version = "1.0.0"
 
     async def execute(self, context: SkillContext) -> SkillResult:
@@ -23,7 +24,6 @@ class RetrievalSkill(BaseSkill):
         context.metadata 可选:
             - top_k: int  返回数量，默认 5
             - doc_type: str  筛选文档类型 "all" / "paper" / "patent"
-            - language: str  筛选语言 "all" / "en" / "zh"
         """
         query = context.query
         if not query:
@@ -33,58 +33,35 @@ class RetrievalSkill(BaseSkill):
         doc_type = context.metadata.get("doc_type", "all")
 
         try:
-            # Phase 1: 纯向量检索
-            vector_results = await self._vector_search(query, top_k * 2)
+            # Step 1: 将查询文本编码为向量
+            embedding_skill = skill_registry.get("embedding")
+            if embedding_skill is None:
+                return SkillResult(
+                    status=SkillStatus.FAILED,
+                    message="EmbeddingSkill not available, cannot encode query.",
+                )
 
-            # Phase 3 TODO: BM25 关键词检索
-            # bm25_results = await self._bm25_search(query, top_k * 2)
+            query_embedding = embedding_skill.encode_query(query)
 
-            # Phase 3 TODO: 合并 + Rerank
-            # merged = self._merge_results(vector_results, bm25_results)
-            # reranked = await self._rerank(query, merged, top_k)
+            # Step 2: Milvus 向量检索
+            milvus = get_milvus_service()
+            results = milvus.search(
+                query_embedding=query_embedding,
+                top_k=top_k,
+                user_id=context.user_id,
+            )
 
-            results = vector_results[:top_k]
+            logger.info(f"Retrieved {len(results)} results for query: '{query[:50]}...'")
 
             return SkillResult(
                 status=SkillStatus.SUCCESS,
                 data={"results": results, "total": len(results)},
                 message=f"Found {len(results)} relevant chunks.",
             )
+
         except Exception as e:
+            logger.error(f"Retrieval failed: {e}", exc_info=True)
             return await self.on_error(context, e)
-
-    async def _vector_search(self, query: str, top_k: int) -> list[dict]:
-        """
-        向量语义检索
-
-        TODO Phase 1:
-        - 将 query 用 bge-m3 编码为向量
-        - 在 Milvus 中做 ANN 检索
-        - 返回 [{chunk_id, content, score, document_id, section_title}, ...]
-        """
-        logger.info(f"Vector search: '{query}', top_k={top_k}")
-        return []
-
-    async def _bm25_search(self, query: str, top_k: int) -> list[dict]:
-        """
-        BM25 关键词检索（PostgreSQL Full-text Search）
-
-        TODO Phase 3:
-        - 使用 PostgreSQL 的 tsvector + tsquery
-        - 中文需要 zhparser 或 jieba 分词
-        """
-        return []
-
-    async def _rerank(self, query: str, candidates: list[dict], top_k: int) -> list[dict]:
-        """
-        Reranking 重排序（bge-reranker-v2-m3）
-
-        TODO Phase 3:
-        - 将 query 和每个 candidate 的 content 组成 pair
-        - 用 reranker 模型打分
-        - 按分数排序返回 top_k
-        """
-        return candidates[:top_k]
 
     def get_input_schema(self) -> dict:
         return {

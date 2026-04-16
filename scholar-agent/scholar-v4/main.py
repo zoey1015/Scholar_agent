@@ -1,5 +1,10 @@
 """
-ScholarAgent 后端入口（Phase 2）
+ScholarAgent 后端入口 v4
+
+新增：
+- 深度研究路由（LangGraph Plan-Execute-Replan）
+- 数据库迁移（paper_claims, paper_relations, research_state, notifications）
+- 上传管线集成（论文上传后触发异步分析）
 """
 
 import logging
@@ -21,30 +26,30 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting ScholarAgent backend...")
+    logger.info("Starting ScholarAgent v4 backend...")
 
     if settings.app_env == "development":
         from backend.db.postgres import init_db
         await init_db()
-        logger.info("Database tables initialized.")
+        logger.info("Base database tables initialized.")
 
+    # 新增表迁移
     try:
         from backend.db.migrations import run_migrations
         run_migrations(None)
-        logger.info("Research feature migrations completed.")
+        logger.info("V4 migrations complete.")
     except Exception as e:
-        logger.warning(f"Research feature migrations skipped: {e}")
+        logger.warning(f"V4 migration warning: {e}")
 
     init_skills()
-    logger.info("ScholarAgent backend is ready.")
+    logger.info("ScholarAgent v4 backend is ready.")
     yield
-
-    logger.info("Shutting down ScholarAgent backend...")
+    logger.info("Shutting down...")
 
 
 app = FastAPI(
     title="ScholarAgent",
-    description="科研知识管理与 AI 辅助研究系统",
+    description="科研知识管理与 AI 辅助研究系统 · Plan-Execute-Replan 架构",
     version="0.5.0",
     lifespan=lifespan,
 )
@@ -57,14 +62,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-from backend.api import documents, proxy, admin, notes, research
+# 基础路由
+from backend.api import documents, proxy, admin, notes
 
 app.include_router(documents.router, prefix=settings.api_prefix)
 app.include_router(proxy.router, prefix=settings.api_prefix)
 app.include_router(admin.router, prefix=settings.api_prefix)
 app.include_router(notes.router, prefix=settings.api_prefix)
-app.include_router(research.router, prefix=settings.api_prefix)
+
+# 深度研究路由（LangGraph）
+try:
+    from backend.api.research import router as research_router
+    app.include_router(research_router, prefix=settings.api_prefix)
+    logger.info("Research router loaded (LangGraph + SSE streaming)")
+except ImportError as e:
+    logger.warning(f"Research router not loaded: {e}. Run: pip install langgraph")
 
 
 @app.get("/")
@@ -72,6 +84,11 @@ async def root():
     return {
         "name": "ScholarAgent",
         "version": "0.5.0",
-        "docs": "/docs",
-        "description": "科研知识后端，支持深度研究与研究看板",
+        "features": [
+            "RAG with streaming",
+            "LangGraph Plan-Execute-Replan",
+            "Cross-paper relation detection (pre-computed)",
+            "Research state tracking",
+            "Smart notifications",
+        ],
     }

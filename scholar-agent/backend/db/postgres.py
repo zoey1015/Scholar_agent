@@ -41,3 +41,16 @@ async def init_db():
     """创建所有表（开发环境使用，生产环境用 Alembic）"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+# 同步引擎（供 Celery worker 使用）
+sync_engine = create_engine(
+    settings.database_url.replace("asyncpg", "psycopg2"),
+    pool_size=5,
+    max_overflow=10,
+)
+
+SyncSession = sessionmaker(sync_engine, expire_on_commit=False)

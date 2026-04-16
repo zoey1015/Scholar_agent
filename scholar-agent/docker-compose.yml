@@ -62,10 +62,22 @@ services:
       MINIO_ROOT_USER: scholar_minio
       MINIO_ROOT_PASSWORD: scholar_minio_123
     ports:
-      - "9000:9000"
+      - "9010:9000"
       - "9001:9001"
     volumes:
       - minio_data:/data
+
+  grobid:
+    image: lfoppiano/grobid:0.8.1
+    container_name: scholar-grobid
+    ports:
+      - "8070:8070"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8070/api/isalive"]
+      interval: 30s
+      timeout: 15s
+      retries: 20
+      start_period: 180s
 
   # ========================
   # Application Layer
@@ -80,6 +92,9 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - /data/spicaKJY/.cache/modelscope:/app/modelscope_cache
+    environment:
+      - TRANSFORMERS_OFFLINE=1
     env_file:
       - .env
     depends_on:
@@ -90,14 +105,16 @@ services:
       milvus:
         condition: service_healthy
 
+
   celery-worker:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: scholar-celery
-    command: celery -A backend.tasks.celery_app worker --loglevel=info
+    command: celery -A backend.tasks.celery_app worker --loglevel=info --concurrency=2
     volumes:
       - .:/app
+      - /data/spicaKJY/.cache/modelscope:/app/modelscope_cache
     env_file:
       - .env
     depends_on:
@@ -105,6 +122,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      milvus:
+        condition: service_healthy
+    environment:
+      - TRANSFORMERS_OFFLINE=1
+      - HF_DATASETS_OFFLINE=1
+      - SENTENCE_TRANSFORMERS_HOME=/app/modelscope_cache/hub
+
 
   frontend:
     build:
@@ -116,6 +140,8 @@ services:
       - "8501:8501"
     volumes:
       - .:/app
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ~/.cache/modelscope:/root/.cache/modelscope
     env_file:
       - .env
     depends_on:
@@ -126,3 +152,4 @@ volumes:
   redis_data:
   milvus_data:
   minio_data:
+

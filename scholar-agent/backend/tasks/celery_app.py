@@ -5,6 +5,7 @@ Celery 异步任务队列配置
 """
 
 from celery import Celery
+from celery.signals import worker_init
 from backend.config import get_settings
 
 settings = get_settings()
@@ -16,6 +17,7 @@ celery_app = Celery(
     include=[
         "backend.tasks.parse_tasks",
         "backend.tasks.embedding_tasks",
+        "backend.tasks.analysis_tasks",
     ],
 )
 
@@ -31,3 +33,14 @@ celery_app.conf.update(
     # 结果过期时间（24小时）
     result_expires=86400,
 )
+
+
+@worker_init.connect
+def init_worker_skills(sender, **kwargs):
+    """Celery worker 启动时初始化 Skills"""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info("Initializing skills in Celery worker...")
+    from backend.skills.registry import init_skills
+    init_skills()
+    logger.info("Skills initialized in Celery worker.")
